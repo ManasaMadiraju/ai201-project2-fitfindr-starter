@@ -20,7 +20,7 @@ Usage (once implemented):
 
 import re
 
-from tools import search_listings, suggest_outfit, create_fit_card
+from tools import search_listings, suggest_outfit, create_fit_card, compare_price, get_trending_styles
 
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -43,6 +43,8 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "fit_card": None,            # string returned by create_fit_card
         "error": None,               # set if the interaction ended early
         "retry_note": None,          # set if size filter was loosened on retry
+        "trending": None,            # string from get_trending_styles
+        "price_verdict": None,       # dict from compare_price
     }
 
 
@@ -118,7 +120,10 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     size = parsed["size"]
     max_price = parsed["max_price"]
 
-    # Step 3: Search listings with parsed parameters
+    # Step 3: Get trending styles (always runs — useful even on no-results path)
+    session["trending"] = get_trending_styles(size)
+
+    # Step 4: Search listings with parsed parameters
     results = search_listings(description, size, max_price)
     session["search_results"] = results
 
@@ -144,15 +149,18 @@ def run_agent(query: str, wardrobe: dict) -> dict:
         )
         return session
 
-    # Step 4: Select the top result
+    # Step 5: Select the top result
     session["selected_item"] = results[0]
 
-    # Step 5: Suggest outfit combinations using the selected item and wardrobe
+    # Step 6: Compare price against comparable listings
+    session["price_verdict"] = compare_price(session["selected_item"])
+
+    # Step 7: Suggest outfit combinations using the selected item and wardrobe
     session["outfit_suggestion"] = suggest_outfit(
         session["selected_item"], wardrobe
     )
 
-    # Step 6: Generate a shareable fit card caption
+    # Step 8: Generate a shareable fit card caption
     session["fit_card"] = create_fit_card(
         session["outfit_suggestion"], session["selected_item"]
     )

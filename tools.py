@@ -244,3 +244,136 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
 
     except Exception:
         return "Fit card unavailable — check your API key and try again."
+
+
+# ── Stretch Tool 1: compare_price ─────────────────────────────────────────────
+
+def compare_price(item: dict) -> dict:
+    """
+    Estimate whether a listing's price is fair based on comparable items
+    in the dataset (same category + overlapping style tags).
+
+    Args:
+        item: A listing dict (the item the user is considering buying).
+
+    Returns:
+        A dict with:
+            verdict (str): "great deal", "fair price", or "overpriced"
+            item_price (float): the item's price
+            avg_comparable_price (float | None): average price of comparables
+            comparable_count (int): number of comparable items found
+            summary (str): one-line human-readable assessment with emoji
+        Never raises — returns verdict="no data" if no comparables exist.
+    """
+    from statistics import mean
+
+    listings = load_listings()
+    category = item.get("category")
+    style_tags = set(item.get("style_tags", []))
+    item_id = item.get("id")
+    item_price = item.get("price", 0.0)
+
+    # Find comparables: same category + at least 1 shared style tag, excluding self
+    comparables = [
+        l for l in listings
+        if l["id"] != item_id
+        and l["category"] == category
+        and set(l.get("style_tags", [])) & style_tags
+    ]
+
+    # Broaden to just same category if too few comparables
+    if len(comparables) < 2:
+        comparables = [
+            l for l in listings
+            if l["id"] != item_id and l["category"] == category
+        ]
+
+    if not comparables:
+        return {
+            "verdict": "no data",
+            "item_price": item_price,
+            "avg_comparable_price": None,
+            "comparable_count": 0,
+            "summary": f"${item_price:.2f} — no comparable listings found to assess fairness.",
+        }
+
+    prices = [l["price"] for l in comparables]
+    avg_price = mean(prices)
+
+    if item_price <= avg_price * 0.8:
+        verdict = "great deal"
+        emoji = "✅"
+    elif item_price >= avg_price * 1.2:
+        verdict = "overpriced"
+        emoji = "⚠️"
+    else:
+        verdict = "fair price"
+        emoji = "👍"
+
+    summary = (
+        f"{emoji} {verdict.title()} — ${item_price:.2f} vs. avg ${avg_price:.2f} "
+        f"across {len(comparables)} comparable {category} listings"
+    )
+
+    return {
+        "verdict": verdict,
+        "item_price": item_price,
+        "avg_comparable_price": round(avg_price, 2),
+        "comparable_count": len(comparables),
+        "summary": summary,
+    }
+
+
+# ── Stretch Tool 2: get_trending_styles ───────────────────────────────────────
+
+def get_trending_styles(size: str | None = None) -> str:
+    """
+    Analyze the listings dataset to surface which style tags are most popular.
+    Optionally filters to listings available in the given size first.
+
+    In a production implementation this would call an external fashion API
+    (e.g., scraping public hashtags). Here it uses the mock dataset as a proxy.
+
+    Args:
+        size: Size string to filter by before counting tags, or None for all listings.
+
+    Returns:
+        A formatted string listing the top 5 trending style tags with counts
+        and an example listing for each. Never raises — returns a fallback
+        message string if the dataset is empty.
+    """
+    from collections import Counter
+
+    listings = load_listings()
+
+    if size:
+        filtered = [l for l in listings if size.lower() in l["size"].lower()]
+        scope = f"in size {size}"
+        if not filtered:
+            filtered = listings
+            scope = "across all sizes (none found for your size)"
+    else:
+        filtered = listings
+        scope = "across all sizes"
+
+    if not filtered:
+        return "No trend data available right now."
+
+    tag_counter: Counter = Counter()
+    tag_example: dict[str, str] = {}
+
+    for listing in filtered:
+        for tag in listing.get("style_tags", []):
+            tag_counter[tag] += 1
+            if tag not in tag_example:
+                tag_example[tag] = listing["title"]
+
+    top = tag_counter.most_common(5)
+    if not top:
+        return "No trend data available right now."
+
+    lines = [f"What's trending {scope}:\n"]
+    for rank, (tag, count) in enumerate(top, 1):
+        lines.append(f"  {rank}. {tag.title()} ({count} listing{'s' if count != 1 else ''}) — e.g. \"{tag_example[tag]}\"")
+
+    return "\n".join(lines)
