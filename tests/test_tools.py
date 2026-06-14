@@ -38,9 +38,9 @@ def test_search_empty_results():
 
 def test_search_price_filter():
     """All returned items must have price <= max_price."""
-    results = search_listings("jacket", size=None, max_price=30)
+    results = search_listings("vintage tee", size=None, max_price=25)
     assert len(results) > 0
-    assert all(item["price"] <= 30 for item in results)
+    assert all(item["price"] <= 25 for item in results)
 
 
 def test_search_price_filter_excludes_over_budget():
