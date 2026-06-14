@@ -204,49 +204,62 @@ For each tool, describe the specific failure mode you're handling and what the a
 User query (natural language)
     │
     ▼
-┌─────────────────────────────────────────────────────────┐
-│                    Planning Loop                         │
-│  (run_agent in agent.py)                                │
-│                                                         │
-│  Step 2: _parse_query(query)                            │
-│    └─► session["parsed"] = {description, size, price}   │
-│                    │                                    │
-│  Step 3: search_listings(description, size, max_price)  │
-│    └─► session["search_results"] = [...]                │
-│                    │                                    │
-│         ┌──────────┴──────────┐                         │
-│    results=[]            results=[...]                  │
-│         │                    │                          │
-│    [retry: drop size]         │                         │
-│         │                    │                          │
-│    still empty?         Step 4: selected_item =         │
-│         │               search_results[0]               │
-│    session["error"]           │                         │
-│    = helpful message     Step 5: suggest_outfit(        │
-│         │                 selected_item, wardrobe)      │
-│    return session ◄─         │                          │
-│    (EARLY EXIT)    session["outfit_suggestion"] = str   │
-│                              │                          │
-│                    wardrobe empty?                      │
-│                    ├── yes: general styling prompt      │
-│                    └── no: wardrobe-specific prompt     │
-│                              │                          │
-│                    Step 6: create_fit_card(             │
-│                       outfit_suggestion, selected_item) │
-│                              │                          │
-│                    session["fit_card"] = caption str    │
-│                              │                          │
-│                    Step 7: return session               │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                      Planning Loop                            │
+│  (run_agent in agent.py)                                     │
+│                                                              │
+│  Step 2: _parse_query(query)                                 │
+│    └─► session["parsed"] = {description, size, price}        │
+│                     │                                        │
+│  Step 3: [STRETCH] get_trending_styles(size)                 │
+│    └─► session["trending"] = trend summary str               │
+│        (always runs — useful even on no-results path)        │
+│                     │                                        │
+│  Step 4: search_listings(description, size, max_price)       │
+│    └─► session["search_results"] = [...]                     │
+│                     │                                        │
+│         ┌───────────┴──────────┐                             │
+│    results=[]             results=[...]                      │
+│         │                     │                             │
+│    [STRETCH retry:        Step 5: selected_item =            │
+│     drop size filter]      search_results[0]                 │
+│         │                     │                             │
+│    still empty?          Step 6: [STRETCH] compare_price(    │
+│         │                  selected_item)                    │
+│    session["error"]        └─► session["price_verdict"]      │
+│    = helpful message              │                          │
+│         │                Step 7: suggest_outfit(             │
+│    return session ◄─         selected_item, wardrobe)        │
+│    (EARLY EXIT)    session["outfit_suggestion"] = str        │
+│                              │                              │
+│                    wardrobe empty?                          │
+│                    ├── yes: general styling prompt          │
+│                    └── no: wardrobe-specific prompt         │
+│                              │                              │
+│                    Step 8: create_fit_card(                 │
+│                       outfit_suggestion, selected_item)     │
+│                              │                              │
+│                    session["fit_card"] = caption str        │
+│                              │                              │
+│                    Step 9: return session                   │
+└──────────────────────────────────────────────────────────────┘
     │                               │
     ▼                               ▼
 session["error"]            session["selected_item"]
 session["fit_card"]=None    session["outfit_suggestion"]
-                            session["fit_card"]
+session["trending"]         session["fit_card"]
+                            session["price_verdict"]
+                            session["trending"]
                                     │
                                     ▼
                             app.py / handle_query()
-                            maps session → 3 UI panels
+                            maps session → 4 UI panels
+                  (listing+price | outfit | fit card | trending)
+
+[STRETCH: memory.py]
+  save_style_profile(wardrobe) → data/style_profile.json
+  load_style_profile()         → wardrobe dict | None
+  UI: "Saved profile" radio + "Save my wardrobe" button
 ```
 
 ---
@@ -269,6 +282,8 @@ I'll give Claude the full Architecture diagram from this file plus the Planning 
 
 ## A Complete Interaction (Step by Step)
 
+FitFindr is an AI agent that takes a plain-English thrift request, searches a mock secondhand dataset for matching listings, evaluates whether the price is fair, and uses the Groq LLM to suggest outfit combinations and generate a shareable Instagram-style caption — all in a single session with no re-entry from the user. If the search returns nothing (even after retrying with loosened size constraints), the agent stops early and tells the user what to try differently rather than passing empty input into the downstream LLM tools.
+
 **Example user query:** "I'm looking for a vintage graphic tee under $30. I mostly wear baggy jeans and chunky sneakers. What's out there and how would I style it?"
 
 **Step 1 — Parse query:**
@@ -285,18 +300,22 @@ session["parsed"] = {"description": "...", "size": None, "max_price": 30.0}
 session["search_results"] = [<band-tee dict>, <y2k-tee dict>, ...]
 session["selected_item"] = <band-tee dict>  (index 0, top match)
 
-**Step 3 — Suggest outfit:**
+**Step 3 — Compare price:**
+`compare_price(selected_item=<band-tee dict>)` finds all listings in the same category (tops) with overlapping style tags. Computes average price of 14 comparable tops. Band tee at $24 vs avg $22 → verdict: "👍 Fair Price — $24.00 vs. avg $22.00 across 14 comparable tops listings". Stored in session["price_verdict"], embedded in listing panel.
+
+**Step 4 — Suggest outfit:**
 `suggest_outfit(selected_item=<band-tee dict>, wardrobe=get_example_wardrobe())` is called. The wardrobe has 10 items, so the non-empty branch runs. The LLM prompt includes the band tee's details and lists all 10 wardrobe items. LLM responds: *"This boxy graphic tee pairs perfectly with your baggy straight-leg jeans (dark wash) and chunky white sneakers for a classic 90s streetwear look. Roll the sleeves once and tuck just the front corner slightly for shape. Alternatively, layer your vintage black denim jacket over it and swap the sneakers for black combat boots to go more grunge."*
 
 session["outfit_suggestion"] = "This boxy graphic tee pairs perfectly with..."
 
-**Step 4 — Create fit card:**
+**Step 5 — Create fit card:**
 `create_fit_card(outfit="This boxy graphic tee pairs perfectly...", new_item=<band-tee dict>)` builds a prompt with the outfit description and item details ($24, depop). LLM at temperature 1.2 responds with: *"thrifted this faded bootleg tee off depop for $24 and it was literally made for my baggy jeans era 🖤 dark wash denim + chunky sneakers and we're giving full 90s without even trying. whole look is under $30 counting the tee"*
 
 session["fit_card"] = "thrifted this faded bootleg tee off depop..."
 
 **Final output to user:**
-Three panels in the Gradio UI:
-- **Top listing found**: title, price ($24.00), platform (Depop), size (L), condition (Good), brand (Unknown), colors (black), style tags, and full description text
+Four panels in the Gradio UI:
+- **Top listing found**: title, price ($24.00), platform (Depop), size (L), condition (Good), brand (Unknown), colors (black), style tags, full description, and price verdict ("👍 Fair Price — $24.00 vs. avg $22.00")
 - **Outfit idea**: the full outfit suggestion paragraph from the LLM
 - **Your fit card**: the 2–3 sentence Instagram caption
+- **Trending right now**: top 5 style tags in the dataset (filtered by size if provided)

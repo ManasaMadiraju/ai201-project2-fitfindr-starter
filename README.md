@@ -71,6 +71,43 @@ Open the URL shown in your terminal (usually `http://localhost:7860`).
 
 **Output:** 2–4 sentence caption string mentioning item name, price, and platform each once. Returns a descriptive error string (not an exception) if `outfit` is empty or whitespace-only.
 
+### Tool 4: `compare_price` *(Stretch)*
+
+**Function signature:** `compare_price(item: dict) → dict`
+
+**Purpose:** Estimates whether a listing's price is fair by comparing it against similar items in the dataset (same category + overlapping style tags). Pure Python — no LLM needed.
+
+**Inputs:**
+- `item` (dict) — a listing dict (the item being evaluated)
+
+**Output:** A dict with `verdict` (str: "great deal" / "fair price" / "overpriced" / "no data"), `item_price` (float), `avg_comparable_price` (float | None), `comparable_count` (int), `summary` (str — one-line human-readable assessment with emoji). Never raises.
+
+---
+
+### Tool 5: `get_trending_styles` *(Stretch)*
+
+**Function signature:** `get_trending_styles(size: str | None) → str`
+
+**Purpose:** Analyzes the listings dataset to surface which style tags appear most frequently. Optionally filters to listings available in the given size first. In production this would call a fashion API; here the mock dataset serves as proxy.
+
+**Inputs:**
+- `size` (str | None) — filters listings to this size before counting tags; `None` uses all listings
+
+**Output:** Formatted string listing top 5 trending style tags with counts and an example item each. Falls back gracefully to all sizes if the given size yields no listings. Never raises.
+
+---
+
+### Tool 6: `save_style_profile` / `load_style_profile` *(Stretch — memory.py)*
+
+**Function signatures:**
+- `save_style_profile(wardrobe: dict) → str`
+- `load_style_profile() → dict | None`
+- `profile_exists() → bool`
+
+**Purpose:** Persists a user's wardrobe to `data/style_profile.json` so it's available across sessions. The UI exposes a "Saved profile" wardrobe option and a "💾 Save current wardrobe" button.
+
+**Output:** `save_style_profile` returns a success/error message string. `load_style_profile` returns the wardrobe dict or `None` if no profile exists. All functions catch exceptions and never raise.
+
 ---
 
 ## How the Planning Loop Works
@@ -86,26 +123,33 @@ Step 2 — Parse query with regex:
     Remove extracted fragments → description str
     Store in session["parsed"].
 
-Step 3 — Call search_listings(description, size, max_price).
+Step 3 — [STRETCH] Call get_trending_styles(size).
+    Store in session["trending"].
+    Always runs — trending context is useful even when search returns nothing.
+
+Step 4 — Call search_listings(description, size, max_price).
     Store in session["search_results"].
 
     IF results is empty AND size was provided:
-        Retry: search_listings(description, None, max_price)   ← loosened
+        [STRETCH] Retry: search_listings(description, None, max_price)
         Set session["retry_note"] = "No results for size X — showing all sizes."
 
     IF results is still empty:
         session["error"] = descriptive message
-        return session   ← EARLY EXIT (suggest_outfit and create_fit_card NOT called)
+        return session   ← EARLY EXIT (compare_price, suggest_outfit, create_fit_card NOT called)
 
-Step 4 — session["selected_item"] = results[0]
+Step 5 — session["selected_item"] = results[0]
 
-Step 5 — Call suggest_outfit(selected_item, wardrobe).
+Step 6 — [STRETCH] Call compare_price(selected_item).
+    Store in session["price_verdict"].
+
+Step 7 — Call suggest_outfit(selected_item, wardrobe).
     Store in session["outfit_suggestion"].
 
-Step 6 — Call create_fit_card(outfit_suggestion, selected_item).
+Step 8 — Call create_fit_card(outfit_suggestion, selected_item).
     Store in session["fit_card"].
 
-Step 7 — Return session.
+Step 9 — Return session.
 ```
 
 The key decision point is after Step 3: if `search_listings` returns an empty list (even after the size-relaxed retry), the agent terminates early with an informative error. This prevents calling `suggest_outfit` with a `None` item or `create_fit_card` with a `None` outfit — both of which would produce meaningless or crashing outputs.
@@ -118,13 +162,15 @@ All state lives in a single `session` dict initialized by `_new_session()` at th
 
 | Key | Set in step | What it holds | Used by |
 |-----|------------|---------------|---------|
-| `session["parsed"]` | Step 2 | `{description, size, max_price}` from query | Step 3 (search) |
-| `session["search_results"]` | Step 3 | list of matching listing dicts | Step 4 (select top) |
-| `session["selected_item"]` | Step 4 | single listing dict (results[0]) | Steps 5 and 6 |
-| `session["outfit_suggestion"]` | Step 5 | string from `suggest_outfit` | Step 6 |
-| `session["fit_card"]` | Step 6 | caption string from `create_fit_card` | Returned to UI |
-| `session["error"]` | Step 3 (if no results) | error string; `None` on success | app.py / UI |
-| `session["retry_note"]` | Step 3 (retry) | note about loosened size filter | UI listing panel |
+| `session["parsed"]` | Step 2 | `{description, size, max_price}` from query | Step 4 (search) |
+| `session["trending"]` | Step 3 | trend summary string from `get_trending_styles` | UI trending panel |
+| `session["search_results"]` | Step 4 | list of matching listing dicts | Step 5 (select top) |
+| `session["selected_item"]` | Step 5 | single listing dict (results[0]) | Steps 6, 7, 8 |
+| `session["price_verdict"]` | Step 6 | dict from `compare_price` (verdict, avg, summary) | UI listing panel |
+| `session["outfit_suggestion"]` | Step 7 | string from `suggest_outfit` | Step 8 |
+| `session["fit_card"]` | Step 8 | caption string from `create_fit_card` | Returned to UI |
+| `session["error"]` | Step 4 (if no results) | error string; `None` on success | app.py / UI |
+| `session["retry_note"]` | Step 4 (retry) | note about loosened size filter | UI listing panel |
 
 State visibly passes between tools: `session["selected_item"]` is the exact same dict object passed into `suggest_outfit` in Step 5. `session["outfit_suggestion"]` is the exact same string passed into `create_fit_card` in Step 6. No re-fetching, no re-prompting the user.
 
@@ -170,9 +216,19 @@ Returns the error message string without raising.
 
 ---
 
-## Stretch Feature: Retry with Fallback
+## Stretch Features
 
-Implemented in `run_agent()` (Steps 3–4 of the planning loop). When `search_listings` returns an empty list **and** the user specified a size, the agent automatically retries with the size filter removed. If the retry finds results, the agent proceeds normally and sets `session["retry_note"]` to inform the user that results are for all sizes. This note appears at the top of the listing panel in the UI. The user is never left with a confusing empty result when a minor constraint relaxation would find something.
+### Retry with fallback
+When `search_listings` returns empty **and** the user specified a size, the agent retries with the size filter removed. On success it sets `session["retry_note"]` and surfaces a warning in the listing panel. If still empty after retry, the agent exits early with an actionable error.
+
+### Price comparison (`compare_price`)
+Called in Step 6 immediately after selecting the top result. Finds comparable listings (same category + overlapping style tags), computes their average price, and labels the item ✅ Great Deal, 👍 Fair Price, or ⚠️ Overpriced. The verdict is embedded in the listing panel alongside the item details.
+
+### Trend awareness (`get_trending_styles`)
+Called in Step 3 on every query — before the search, so trend context is available even on the no-results path. Counts style tag frequency across the dataset (filtered by size when provided) and returns the top 5 trending styles with listing counts and example items. Displayed in the dedicated **🔥 Trending right now** panel.
+
+### Style profile memory (`memory.py`)
+`save_style_profile(wardrobe)` writes the user's wardrobe dict + a timestamp to `data/style_profile.json`. `load_style_profile()` reads it back. The UI exposes a **💾 Save current wardrobe** button and a **Saved profile** wardrobe option that loads the persisted wardrobe automatically on the next session.
 
 ---
 
