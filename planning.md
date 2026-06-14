@@ -1,200 +1,184 @@
 # FitFindr — planning.md
 
-> Complete this document before writing any implementation code.
-> Your spec and agent diagram are what you'll use to direct AI tools (Claude, Copilot, etc.) to generate your implementation — the more specific they are, the more useful the generated code will be.
-> Your planning.md will be reviewed as part of your submission.
-> Update it before starting any stretch features.
-
 ---
 
 ## Tools
 
-List every tool your agent will use. For each tool, fill in all four fields.
-You must have at least 3 tools. The three required tools are listed — add any additional tools below them.
-
 ### Tool 1: search_listings
 
 **What it does:**
-Searches the mock listings dataset (`data/listings.json`) for secondhand items that match the user's keyword description, optional size filter, and optional price ceiling. Returns results ranked by relevance so the best match appears first.
+Goes through all 40 listings in `data/listings.json` and finds ones that match what you're looking for. First it cuts anything over the price limit or the wrong size. Then it scores what's left by counting how many of your keywords show up in the title, description, category, style tags, colors, and brand. Best matches come back first.
 
 **Input parameters:**
-- `description` (str): Keywords describing the item the user wants (e.g., "vintage graphic tee", "90s track jacket"). Used to score listings by keyword overlap against title, description, category, style_tags, colors, and brand fields.
-- `size` (str | None): Size string to filter by, e.g. `"M"`, `"S/M"`, `"XL"`. Case-insensitive substring match against the listing's `size` field. `None` means no size filter is applied.
-- `max_price` (float | None): Maximum price in USD (inclusive). Listings with `price > max_price` are excluded. `None` means no price filter.
+- `description` (str): What you're looking for — e.g. "vintage graphic tee" or "90s track jacket". Used to score listings by keyword overlap.
+- `size` (str | None): Like "M" or "S/M". Checks if your size appears anywhere in the listing's size field. Pass None to skip size filtering.
+- `max_price` (float | None): Price ceiling in dollars. Listings above this get dropped. Pass None to skip price filtering.
 
 **What it returns:**
-A `list[dict]` of matching listing dicts, sorted by relevance score (highest first). Each dict contains: `id` (str), `title` (str), `description` (str), `category` (str — one of tops/bottoms/outerwear/shoes/accessories), `style_tags` (list[str]), `size` (str), `condition` (str — excellent/good/fair), `price` (float), `colors` (list[str]), `brand` (str or None), `platform` (str — depop/thredUp/poshmark). Returns `[]` (empty list) if nothing matches — never raises an exception.
+A list of listing dicts sorted by best match. Each one has: `id`, `title`, `description`, `category`, `style_tags`, `size`, `condition`, `price`, `colors`, `brand`, `platform`. Returns an empty list if nothing matches — never crashes.
 
 **What happens if it fails or returns nothing:**
-The agent checks `if not results` immediately after calling this tool. If the list is empty, the agent first retries with the size filter removed (stretch feature — retry with loosened constraints) and informs the user. If still empty, the agent sets `session["error"]` to a message like: *"No listings found for 'designer ballgown' in size XXS under $5. Try different keywords, a higher price, or skip the size filter."* — then returns the session early without calling `suggest_outfit` or `create_fit_card`.
+The agent checks right away if the list came back empty. If the user gave a size, it retries without the size filter first. If that still finds nothing, the agent sets an error message like: *"No listings found for 'designer ballgown' in size XXS under $5. Try different keywords, a higher price, or leave out the size filter."* — and stops there without calling the other tools.
 
 ---
 
 ### Tool 2: suggest_outfit
 
 **What it does:**
-Given a specific secondhand listing and the user's current wardrobe, calls the Groq LLM (llama-3.3-70b-versatile) to suggest 1–2 complete outfit combinations. When the wardrobe is empty, it falls back to general styling advice for the item instead of crashing.
+Takes the item from the search and the user's wardrobe, then asks the Groq LLM to suggest 1–2 outfits. If the wardrobe has items, the response mentions specific pieces by name. If the wardrobe is empty, it gives general styling advice instead of failing.
 
 **Input parameters:**
-- `new_item` (dict): A single listing dict from `search_listings` output (the item the user is considering buying). Uses `title`, `description`, `style_tags`, `colors`, and `category` fields in the prompt.
-- `wardrobe` (dict): A wardrobe dict with an `items` key containing a list of wardrobe item dicts. Each wardrobe item has `id`, `name`, `category`, `colors`, `style_tags`, and `notes`. May have an empty `items` list — must be handled gracefully.
+- `new_item` (dict): The listing dict from search_listings — the item the user might buy. Uses the title, description, style tags, colors, and category in the prompt.
+- `wardrobe` (dict): Has an `items` key with a list of wardrobe pieces. Can be empty.
 
 **What it returns:**
-A non-empty string (2–6 sentences) with outfit suggestions. If the wardrobe has items, the response names specific wardrobe pieces to pair with the new item and describes the overall look/vibe. If the wardrobe is empty, it provides general styling advice (what kinds of basics pair well, what aesthetic the item suits) without referencing specific wardrobe pieces.
+A non-empty string with outfit suggestions. Either specific wardrobe combos or general styling tips if the wardrobe is empty.
 
 **What happens if it fails or returns nothing:**
-If `wardrobe['items']` is empty, the tool switches to a general-styling prompt rather than raising an error. If the LLM call itself throws an exception (e.g., API error), the tool catches it and returns the string `"Unable to generate outfit suggestions at this time. The item you selected is a {category} — consider pairing it with complementary basics."` so the agent can still attempt `create_fit_card` with the fallback text.
+If `wardrobe['items']` is empty, it switches to a general styling prompt instead of crashing. If the LLM call throws an error, it catches it and returns something like: "Unable to generate outfit suggestions right now. The item is a {category} — try pairing it with complementary basics." So the agent can still move on.
 
 ---
 
 ### Tool 3: create_fit_card
 
 **What it does:**
-Generates a short (2–4 sentence) Instagram/TikTok-style caption for the thrifted outfit. Calls the Groq LLM at higher temperature (1.2) so output varies meaningfully across different inputs. The caption should feel authentic and conversational, not like a product listing.
+Takes the outfit suggestion and writes a short Instagram-style caption for it. Runs at temperature 1.2 so it sounds different each time instead of like a product description. If the outfit string is empty, it returns an error message instead of calling the LLM.
 
 **Input parameters:**
-- `outfit` (str): The outfit suggestion string returned by `suggest_outfit`. Must be non-empty; if empty or whitespace-only, the tool returns an error string without calling the LLM.
-- `new_item` (dict): The listing dict for the thrifted item. Used to pull `title`, `price`, and `platform` into the caption naturally.
+- `outfit` (str): The suggestion from suggest_outfit. Can't be empty.
+- `new_item` (dict): Used to pull in the item name, price, and platform.
 
 **What it returns:**
-A 2–4 sentence string suitable as an OOTD caption — casual tone, mentions item name + price + platform once each, captures the outfit vibe with specific language. Returns a descriptive error string (not an exception) if `outfit` is empty: `"Cannot generate a fit card without an outfit suggestion. Please try your search again."`.
+A 2–4 sentence caption that mentions the item, price, and platform once each. Returns an error string if outfit is empty — never crashes.
 
 **What happens if it fails or returns nothing:**
-If `outfit` is empty or whitespace-only, returns the error string above immediately without calling the LLM. If the LLM throws an exception, catches it and returns `"Fit card unavailable — check your API key and try again."` The agent displays whatever string this tool returns; it does not re-raise the error.
+Checks `if not outfit or not outfit.strip()` before doing anything. Returns `"Cannot generate a fit card without an outfit suggestion. Please try your search again."` without touching the LLM. If the LLM itself throws an error, it catches it and returns a fallback string.
 
 ---
 
-### Additional Tools (if any)
-
-*(Stretch feature: retry with fallback is handled inside the planning loop rather than as a separate tool — see Planning Loop section.)*
-
----
-
-### Stretch Tool 1: compare_price *(Price comparison)*
+### Stretch Tool 1: compare_price
 
 **What it does:**
-Given a listing, finds comparable items in the dataset (same category + overlapping style tags) and estimates whether the price is fair. Pure Python — no LLM needed.
+Checks if the item's price is fair by finding similar listings (same category + overlapping style tags) and averaging their prices. No LLM needed — it's just math.
 
 **Input parameters:**
-- `item` (dict): A listing dict (the item the user is considering buying)
+- `item` (dict): The listing being evaluated.
 
 **What it returns:**
-A dict with: `verdict` (str — "great deal", "fair price", or "overpriced"), `item_price` (float), `avg_comparable_price` (float), `comparable_count` (int), `summary` (str — human-readable one-line assessment with emoji).
+A dict with: `verdict` ("great deal", "fair price", or "overpriced"), `item_price`, `avg_comparable_price`, `comparable_count`, and `summary` (a one-line result with an emoji like "👍 Fair Price — $24 vs avg $22 across 14 similar tops").
 
 **What happens if it fails or returns nothing:**
-If no comparables exist (e.g., only one item of that category), returns `verdict="no data"` and a message in `summary`. Never raises.
+If there's nothing to compare against, returns `verdict="no data"` and a note in summary. Never raises.
 
 ---
 
-### Stretch Tool 2: get_trending_styles *(Trend awareness)*
+### Stretch Tool 2: get_trending_styles
 
 **What it does:**
-Analyzes the listings dataset to surface which style tags appear most frequently. If a size is provided, filters to listings available in that size first. In a real implementation this would call an external fashion API; here it uses the mock dataset as a proxy.
+Counts which style tags appear most in the listings dataset. If you pass a size, it only looks at listings in that size. In a real app this would call a fashion API — here it just uses the mock data.
 
 **Input parameters:**
-- `size` (str | None): Size to filter listings by before counting tags; `None` uses all listings
+- `size` (str | None): Filter by size first, or pass None to count across all listings.
 
 **What it returns:**
-A formatted string listing the top 5 trending style tags with their listing counts and an example item for each.
-
-**What happens if it fails or returns nothing:**
-Returns a fallback string ("No trend data available") rather than raising.
+A string with the top 5 style tags, how many listings have each one, and an example item for each. Falls back to all sizes if none match. Never crashes.
 
 ---
 
 ### Stretch Feature 3: Style profile memory
 
 **What it does:**
-Saves the user's wardrobe to `data/style_profile.json` so it persists across sessions. `save_style_profile(wardrobe)` writes the file; `load_style_profile()` reads it back. The UI exposes a "Saved profile" wardrobe option and a "Save my wardrobe" button.
+Saves the user's wardrobe to `data/style_profile.json` so it comes back next time. The UI has a "Save my wardrobe" button and a "Saved profile" option that loads the file automatically.
 
 **Input/output:**
-- `save_style_profile(wardrobe: dict) → str` — returns a success/error message
-- `load_style_profile() → dict | None` — returns wardrobe dict or None if no profile saved
-- `profile_exists() → bool` — used by the UI to show/hide the saved profile option
+- `save_style_profile(wardrobe: dict) → str` — success or error message
+- `load_style_profile() → dict | None` — wardrobe dict, or None if nothing saved
+- `profile_exists() → bool` — used by the UI to show or hide the saved profile option
 
 **What happens if it fails:**
-Both functions catch all exceptions and return a fallback string/None. The UI falls back to the example wardrobe if the saved profile can't be loaded.
+Both functions catch all exceptions and return a fallback value. If the saved profile can't load, the UI falls back to the example wardrobe.
 
 ---
 
 ## Planning Loop
 
-**How does your agent decide which tool to call next?**
+**How does the agent decide what to do next?**
 
-The planning loop in `run_agent()` follows a strict conditional sequence with one early-exit branch:
+The loop runs in `run_agent()` and checks what came back at each step before moving on. The one real branching point is after the search — if nothing matches, it stops there.
 
 ```
-Step 1 — Initialize session dict with _new_session(query, wardrobe).
+Step 1 — Initialize a fresh session dict for this interaction.
 
-Step 2 — Parse query with _parse_query(query):
-    Use regex to extract:
-      - max_price: match "under $30", "$30", or "under 30" → float or None
-      - size: match "size M" or standalone XS/S/M/L/XL/XXL → str or None
-      - description: original query with price/size fragments removed
-    Store result in session["parsed"].
+Step 2 — Parse the query with regex:
+    - max_price: look for "under $30", "$30", "under 30" → float or None
+    - size: look for "size M" or standalone XS/S/M/L/XL/XXL → str or None
+    - description: what's left after stripping price and size
+    Store in session["parsed"].
 
-Step 3 — [STRETCH] Call get_trending_styles(size).
-    Store string in session["trending"].
+Step 3 — Run get_trending_styles(size). [STRETCH]
+    Store in session["trending"].
+    This always runs — even if the search later finds nothing.
 
-Step 4 — Call search_listings(description, size, max_price).
-    Store list in session["search_results"].
+Step 4 — Run search_listings(description, size, max_price).
+    Store in session["search_results"].
 
-    if results is empty AND size was provided (stretch retry):
-        retry search_listings(description, None, max_price)  ← size filter removed
-        store retry results in session["search_results"]
-        set session["retry_note"] = "No results for size {size} — showing all sizes."
+    If results is empty AND a size was given: [STRETCH retry]
+        Retry with size=None.
+        Store retry results in session["search_results"].
+        Set session["retry_note"] = "No results for size {size} — showing all sizes."
 
-    if results is still empty:
-        set session["error"] = helpful message with what was searched + what to try
-        return session  ← EARLY EXIT — do NOT call suggest_outfit or create_fit_card
+    If still empty:
+        Set session["error"] = helpful message with what was searched + what to try.
+        return session  ← EARLY EXIT — suggest_outfit and create_fit_card do NOT run.
 
-Step 5 — Select top result:
+Step 5 — Pick the top result:
     session["selected_item"] = session["search_results"][0]
 
-Step 6 — [STRETCH] Call compare_price(selected_item).
-    Store dict in session["price_verdict"].
+Step 6 — Run compare_price(selected_item). [STRETCH]
+    Store in session["price_verdict"].
 
-Step 7 — Call suggest_outfit(selected_item, wardrobe).
-    Store string in session["outfit_suggestion"].
+Step 7 — Run suggest_outfit(selected_item, wardrobe).
+    Store in session["outfit_suggestion"].
 
-Step 8 — Call create_fit_card(outfit_suggestion, selected_item).
-    Store string in session["fit_card"].
+Step 8 — Run create_fit_card(outfit_suggestion, selected_item).
+    Store in session["fit_card"].
 
 Step 9 — Return session.
 ```
 
-The agent does **not** call all tools unconditionally. The key branch is after Step 4: if `search_listings` returns an empty list (even after retry), the agent sets an error and returns immediately — `compare_price`, `suggest_outfit`, and `create_fit_card` are never called. `get_trending_styles` always runs since trend context is useful even when no item is found.
+The agent doesn't run all tools every time. If the search finds nothing, it stops at Step 4 and returns the error. `get_trending_styles` always runs because trend data is still useful even when the search fails.
 
 ---
 
 ## State Management
 
-**How does information from one tool get passed to the next?**
+**How does info from one tool get to the next?**
 
-A single `session` dict is initialized at the start of `run_agent()` and passed by reference through the entire loop. It is the only source of truth for the interaction.
+Everything goes into a single `session` dict that gets created at the start of `run_agent()`. Tools don't talk to each other — the planning loop reads from and writes to the session, then passes the right values in as arguments.
 
-What is stored and when:
-- `session["parsed"]` — set in Step 2; contains `description`, `size`, `max_price` extracted from the raw query
-- `session["search_results"]` — set in Step 3; list of matching listing dicts from `search_listings`
-- `session["selected_item"]` — set in Step 4; the single dict at index 0 of `search_results`. This exact dict object is passed directly into `suggest_outfit` and `create_fit_card` — no re-lookup, no re-entry from the user.
-- `session["outfit_suggestion"]` — set in Step 5; the string returned by `suggest_outfit`. Passed directly into `create_fit_card` as the `outfit` argument.
-- `session["fit_card"]` — set in Step 6; final output string.
-- `session["error"]` — set if an early exit occurs; left as `None` on the happy path.
-- `session["retry_note"]` — optionally set in the retry branch; surfaced in the UI listing panel.
+| Key | When it's set | What's in it |
+|-----|--------------|--------------|
+| `session["parsed"]` | Step 2 | description, size, max_price from the raw query |
+| `session["trending"]` | Step 3 | trending styles string |
+| `session["search_results"]` | Step 4 | list of matching listing dicts |
+| `session["selected_item"]` | Step 5 | the top listing dict |
+| `session["price_verdict"]` | Step 6 | price comparison result dict |
+| `session["outfit_suggestion"]` | Step 7 | outfit ideas string |
+| `session["fit_card"]` | Step 8 | the caption string |
+| `session["error"]` | Step 4 if no results | error message, None on the happy path |
+| `session["retry_note"]` | Step 4 if size retry happened | note that size filter was loosened |
 
-Tools do not call each other or share a global state object. Each tool receives exactly what it needs as function arguments, sourced from the session dict in the planning loop.
+The item from the search and the outfit string from suggest_outfit are passed directly into the next tool — nothing gets re-fetched or re-generated between steps.
 
 ---
 
 ## Error Handling
 
-For each tool, describe the specific failure mode you're handling and what the agent does in response.
-
-| Tool | Failure mode | Agent response |
+| Tool | Failure mode | What the agent does |
 |------|-------------|----------------|
-| search_listings | No results match the query | Agent first retries with size filter removed (if size was given). If still empty, sets `session["error"]` to: *"No listings found for '{description}' [in size {size}] [under ${price}]. Try different keywords, a higher price, or skip the size filter."* Returns session early. `suggest_outfit` and `create_fit_card` are never called. |
-| suggest_outfit | Wardrobe is empty (`wardrobe['items'] == []`) | Tool detects empty items list and switches to a different LLM prompt asking for general styling advice rather than wardrobe-specific pairings. Returns a non-empty string describing what aesthetics the item suits and what kinds of pieces pair well with it. Never raises an exception. |
-| create_fit_card | Outfit input is empty or whitespace-only string | Tool checks `if not outfit or not outfit.strip()` before calling LLM. Returns the string `"Cannot generate a fit card without an outfit suggestion. Please try your search again."` — never raises an exception. |
+| search_listings | No results match | Retries without size filter first (if size was given). If still empty, sets `session["error"]` and returns early. `suggest_outfit` and `create_fit_card` never run. |
+| suggest_outfit | Wardrobe is empty | Switches to a different LLM prompt asking for general styling advice instead of wardrobe-specific pairings. Returns a non-empty string either way. |
+| create_fit_card | Outfit input is empty | Checks `if not outfit or not outfit.strip()` before touching the LLM. Returns an error string instead of raising. |
 
 ---
 
@@ -266,56 +250,55 @@ session["trending"]         session["fit_card"]
 
 ## AI Tool Plan
 
-**Milestone 3 — Individual tool implementations:**
+**Milestone 3 — Tool implementations:**
 
-- **search_listings**: I'll give Claude the Tool 1 spec block from this planning.md (inputs, scoring approach, return value, failure mode) and ask it to implement the function using `load_listings()` from the data loader. I'll verify: does it filter by both price and size? Does it score by keyword overlap across all text fields (title, description, category, style_tags, colors, brand)? Does it return `[]` on no match without raising? I'll test it with 3 queries: "vintage graphic tee" (should return results), "designer ballgown size XXS under $5" (should return []), and "jacket under $10" (should respect price filter).
+- **search_listings**: I gave Claude the Tool 1 spec (inputs, scoring approach, return value, what to do on no results) and asked it to implement the function using `load_listings()`. I checked: does it filter by both price and size? Does it score by keyword overlap across all text fields? Does it return `[]` without crashing? I tested with "vintage graphic tee" (should get results), "designer ballgown size XXS under $5" (should return []), and "jacket under $10" (should respect price ceiling). The generated code worked but used one big regex on all fields combined. I split it into separate fields and joined them, which is easier to follow. I also added a set of common noise words to filter out ("a", "the", "for", etc.) because without it they matched everything and inflated scores.
 
-- **suggest_outfit**: I'll give Claude the Tool 2 spec and the wardrobe_schema.json structure and ask it to implement using Groq's llama-3.3-70b-versatile. I'll verify: does it branch on empty vs non-empty wardrobe? Does it reference specific wardrobe item names in the non-empty case? Does it handle the empty case without returning an empty string? I'll test with both `get_example_wardrobe()` and `get_empty_wardrobe()`.
+- **suggest_outfit**: I gave Claude the Tool 2 spec and the wardrobe_schema.json structure and asked it to implement with Groq's llama-3.3-70b-versatile. I checked: does it branch on empty vs non-empty wardrobe? Does it name specific wardrobe pieces when the wardrobe has items? Does it handle empty wardrobe without returning an empty string? Tested with both `get_example_wardrobe()` and `get_empty_wardrobe()`.
 
-- **create_fit_card**: I'll give Claude the Tool 3 spec and ask it to implement with temperature=1.2 and a guard against empty outfit string. I'll verify: does it return an error string (not raise) on empty input? Does it run the same prompt twice and produce meaningfully different outputs? Does the caption mention price and platform naturally?
+- **create_fit_card**: I gave Claude the Tool 3 spec and asked it to implement with temperature=1.2 and a guard against empty outfit string. I checked: does it return an error string (not raise) on empty input? Does running the same prompt twice produce different output? Does the caption mention price and platform?
 
-**Milestone 4 — Planning loop and state management:**
+**Milestone 4 — Planning loop:**
 
-I'll give Claude the full Architecture diagram from this file plus the Planning Loop and State Management sections and ask it to implement `run_agent()`. I'll verify: does it branch on empty `search_results`? Does it pass `session["selected_item"]` (not a re-lookup) into `suggest_outfit`? Does it pass `session["outfit_suggestion"]` (not a re-call) into `create_fit_card`? I'll print `session["selected_item"]` and confirm it's the exact same dict going into `suggest_outfit`. I'll test the no-results path with "designer ballgown size XXS under $5" and confirm `session["fit_card"]` is `None`.
+I gave Claude the full architecture diagram plus the Planning Loop and State Management sections and asked it to implement `run_agent()`. I checked: does it branch on empty `search_results`? Does it pass `session["selected_item"]` into `suggest_outfit` without re-fetching? Does it pass `session["outfit_suggestion"]` into `create_fit_card` without re-calling? I tested the no-results path with "designer ballgown size XXS under $5" and confirmed `session["fit_card"]` comes back as None.
 
 ---
 
 ## A Complete Interaction (Step by Step)
 
-FitFindr is an AI agent that takes a plain-English thrift request, searches a mock secondhand dataset for matching listings, evaluates whether the price is fair, and uses the Groq LLM to suggest outfit combinations and generate a shareable Instagram-style caption — all in a single session with no re-entry from the user. If the search returns nothing (even after retrying with loosened size constraints), the agent stops early and tells the user what to try differently rather than passing empty input into the downstream LLM tools.
+FitFindr is an AI agent for thrift shopping. You type what you're looking for in plain English, it searches a mock dataset of secondhand listings, checks if the price is fair, suggests outfit ideas using your wardrobe, and writes a caption you could actually post. If nothing matches, it tells you what to try instead of just breaking.
 
-**Example user query:** "I'm looking for a vintage graphic tee under $30. I mostly wear baggy jeans and chunky sneakers. What's out there and how would I style it?"
+**Example query:** "vintage graphic tee under $30"
 
-**Step 1 — Parse query:**
-`_parse_query` extracts:
-- `description`: "I'm looking for a vintage graphic tee. I mostly wear baggy jeans and chunky sneakers. What's out there and how would I style it?" (price fragment stripped)
-- `size`: `None` (no size mentioned)
-- `max_price`: `30.0`
+**Step 1 — Parse the query:**
+`_parse_query` pulls out:
+- `description`: "vintage graphic tee" (after stripping the price part)
+- `size`: None (no size mentioned)
+- `max_price`: 30.0
 
-session["parsed"] = {"description": "...", "size": None, "max_price": 30.0}
+session["parsed"] = {"description": "vintage graphic tee", "size": None, "max_price": 30.0}
 
 **Step 2 — Search listings:**
-`search_listings("vintage graphic tee ...", size=None, max_price=30.0)` loads all 40 listings, filters to those with price ≤ $30, then scores each remaining listing by counting overlapping keywords ("vintage", "graphic", "tee", etc.) against title/description/style_tags/category/colors/brand. Items like "Graphic Tee — 2003 Tour Bootleg Style" ($24, style_tags include "graphic tee", "vintage") score highest. Returns a list of 3–5 matching dicts sorted by score.
+`search_listings("vintage graphic tee", size=None, max_price=30.0)` loads all 40 listings, drops anything over $30, then scores what's left by counting how many keywords match each listing. Something like "Graphic Tee — 2003 Tour Bootleg Style" at $24 with style_tags ["graphic tee", "vintage"] scores high. Returns 3–5 matching dicts sorted by score.
 
 session["search_results"] = [<band-tee dict>, <y2k-tee dict>, ...]
-session["selected_item"] = <band-tee dict>  (index 0, top match)
+session["selected_item"] = <band-tee dict>  (first result)
 
 **Step 3 — Compare price:**
-`compare_price(selected_item=<band-tee dict>)` finds all listings in the same category (tops) with overlapping style tags. Computes average price of 14 comparable tops. Band tee at $24 vs avg $22 → verdict: "👍 Fair Price — $24.00 vs. avg $22.00 across 14 comparable tops listings". Stored in session["price_verdict"], embedded in listing panel.
+`compare_price(selected_item)` finds all listings in the same category (tops) with overlapping style tags. Averages their prices. Band tee at $24 vs avg $22 → verdict: "👍 Fair Price — $24.00 vs. avg $22.00 across 14 comparable tops listings". Stored in session["price_verdict"] and shown in the listing panel.
 
 **Step 4 — Suggest outfit:**
-`suggest_outfit(selected_item=<band-tee dict>, wardrobe=get_example_wardrobe())` is called. The wardrobe has 10 items, so the non-empty branch runs. The LLM prompt includes the band tee's details and lists all 10 wardrobe items. LLM responds: *"This boxy graphic tee pairs perfectly with your baggy straight-leg jeans (dark wash) and chunky white sneakers for a classic 90s streetwear look. Roll the sleeves once and tuck just the front corner slightly for shape. Alternatively, layer your vintage black denim jacket over it and swap the sneakers for black combat boots to go more grunge."*
+`suggest_outfit(selected_item, wardrobe)` is called. The wardrobe has items, so the LLM prompt includes both the band tee details and the wardrobe list. LLM responds with something like: *"This boxy graphic tee pairs perfectly with your baggy straight-leg jeans and chunky white sneakers for a 90s streetwear look. Roll the sleeves once and do a slight front tuck for shape. Or throw your vintage denim jacket on top and switch to combat boots to go more grunge."*
 
 session["outfit_suggestion"] = "This boxy graphic tee pairs perfectly with..."
 
 **Step 5 — Create fit card:**
-`create_fit_card(outfit="This boxy graphic tee pairs perfectly...", new_item=<band-tee dict>)` builds a prompt with the outfit description and item details ($24, depop). LLM at temperature 1.2 responds with: *"thrifted this faded bootleg tee off depop for $24 and it was literally made for my baggy jeans era 🖤 dark wash denim + chunky sneakers and we're giving full 90s without even trying. whole look is under $30 counting the tee"*
+`create_fit_card(outfit_suggestion, selected_item)` builds a prompt with the outfit and item details ($24, depop). LLM at temp 1.2 responds with: *"thrifted this faded bootleg tee off depop for $24 and it was made for my baggy jeans era 🖤 dark wash denim + chunky sneakers and we're giving full 90s without trying. whole look is under $30 counting the tee"*
 
 session["fit_card"] = "thrifted this faded bootleg tee off depop..."
 
-**Final output to user:**
-Four panels in the Gradio UI:
-- **Top listing found**: title, price ($24.00), platform (Depop), size (L), condition (Good), brand (Unknown), colors (black), style tags, full description, and price verdict ("👍 Fair Price — $24.00 vs. avg $22.00")
-- **Outfit idea**: the full outfit suggestion paragraph from the LLM
-- **Your fit card**: the 2–3 sentence Instagram caption
-- **Trending right now**: top 5 style tags in the dataset (filtered by size if provided)
+**Final output — 4 panels in the UI:**
+- **Top listing found**: title, price ($24.00), platform (Depop), size, condition, brand, colors, style tags, description, price verdict
+- **Outfit idea**: the full outfit suggestion from the LLM
+- **Your fit card**: the Instagram caption
+- **Trending right now**: top 5 style tags in the dataset (filtered by size if one was given)
