@@ -70,6 +70,53 @@ If `outfit` is empty or whitespace-only, returns the error string above immediat
 
 ---
 
+### Stretch Tool 1: compare_price *(Price comparison)*
+
+**What it does:**
+Given a listing, finds comparable items in the dataset (same category + overlapping style tags) and estimates whether the price is fair. Pure Python — no LLM needed.
+
+**Input parameters:**
+- `item` (dict): A listing dict (the item the user is considering buying)
+
+**What it returns:**
+A dict with: `verdict` (str — "great deal", "fair price", or "overpriced"), `item_price` (float), `avg_comparable_price` (float), `comparable_count` (int), `summary` (str — human-readable one-line assessment with emoji).
+
+**What happens if it fails or returns nothing:**
+If no comparables exist (e.g., only one item of that category), returns `verdict="no data"` and a message in `summary`. Never raises.
+
+---
+
+### Stretch Tool 2: get_trending_styles *(Trend awareness)*
+
+**What it does:**
+Analyzes the listings dataset to surface which style tags appear most frequently. If a size is provided, filters to listings available in that size first. In a real implementation this would call an external fashion API; here it uses the mock dataset as a proxy.
+
+**Input parameters:**
+- `size` (str | None): Size to filter listings by before counting tags; `None` uses all listings
+
+**What it returns:**
+A formatted string listing the top 5 trending style tags with their listing counts and an example item for each.
+
+**What happens if it fails or returns nothing:**
+Returns a fallback string ("No trend data available") rather than raising.
+
+---
+
+### Stretch Feature 3: Style profile memory
+
+**What it does:**
+Saves the user's wardrobe to `data/style_profile.json` so it persists across sessions. `save_style_profile(wardrobe)` writes the file; `load_style_profile()` reads it back. The UI exposes a "Saved profile" wardrobe option and a "Save my wardrobe" button.
+
+**Input/output:**
+- `save_style_profile(wardrobe: dict) → str` — returns a success/error message
+- `load_style_profile() → dict | None` — returns wardrobe dict or None if no profile saved
+- `profile_exists() → bool` — used by the UI to show/hide the saved profile option
+
+**What happens if it fails:**
+Both functions catch all exceptions and return a fallback string/None. The UI falls back to the example wardrobe if the saved profile can't be loaded.
+
+---
+
 ## Planning Loop
 
 **How does your agent decide which tool to call next?**
@@ -86,7 +133,10 @@ Step 2 — Parse query with _parse_query(query):
       - description: original query with price/size fragments removed
     Store result in session["parsed"].
 
-Step 3 — Call search_listings(description, size, max_price).
+Step 3 — [STRETCH] Call get_trending_styles(size).
+    Store string in session["trending"].
+
+Step 4 — Call search_listings(description, size, max_price).
     Store list in session["search_results"].
 
     if results is empty AND size was provided (stretch retry):
@@ -98,19 +148,22 @@ Step 3 — Call search_listings(description, size, max_price).
         set session["error"] = helpful message with what was searched + what to try
         return session  ← EARLY EXIT — do NOT call suggest_outfit or create_fit_card
 
-Step 4 — Select top result:
+Step 5 — Select top result:
     session["selected_item"] = session["search_results"][0]
 
-Step 5 — Call suggest_outfit(selected_item, wardrobe).
+Step 6 — [STRETCH] Call compare_price(selected_item).
+    Store dict in session["price_verdict"].
+
+Step 7 — Call suggest_outfit(selected_item, wardrobe).
     Store string in session["outfit_suggestion"].
 
-Step 6 — Call create_fit_card(outfit_suggestion, selected_item).
+Step 8 — Call create_fit_card(outfit_suggestion, selected_item).
     Store string in session["fit_card"].
 
-Step 7 — Return session.
+Step 9 — Return session.
 ```
 
-The agent does **not** call all tools unconditionally. The key branch is after Step 3: if `search_listings` returns an empty list, the agent sets an error and returns immediately — `suggest_outfit` and `create_fit_card` are never called. This prevents passing empty or `None` values into downstream tools.
+The agent does **not** call all tools unconditionally. The key branch is after Step 4: if `search_listings` returns an empty list (even after retry), the agent sets an error and returns immediately — `compare_price`, `suggest_outfit`, and `create_fit_card` are never called. `get_trending_styles` always runs since trend context is useful even when no item is found.
 
 ---
 
